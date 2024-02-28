@@ -1,1 +1,1 @@
-*Metastatic_Breast_Patients* - SQL code for pulling metastatic breast cancer patients with metastatic diagnosis date within certain time frame, who are all on some sort of systemic therapy and have an HR/HER2 status
+*Metastatic_Breast_Patients* - complex SQL query for pulling metastatic breast cancer patients with metastatic diagnosis date within certain time frame, who are all on some sort of systemic therapy and have an HR/HER2 status
