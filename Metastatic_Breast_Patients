@@ -1,0 +1,201 @@
+-- SQL code for getting metastatic breast cancer patients with systemic therapy and specific diagnosis dates
+
+--- get mBC pts with systemic therapy and diagnosis date
+drop table if exists #breast_pts_systx;
+create table #breast_pts_systx as (
+ with mets as (
+    SELECT patient_id,
+       min(met_date) as met_date
+    FROM (
+           (
+             SELECT distinct patient_id,
+                             curation_indicator,
+                             min(stage_date) as met_date,
+                             min(stage_date_collected) AS met_date_collected
+                FROM stage
+                WHERE curation_indicator = 1 and
+                      (LOWER(stage_group_name) LIKE 'stage 4%' OR
+                       LOWER(mstage_name) LIKE '%m1%')
+                group by 1,2
+           )
+            UNION
+           (
+             SELECT distinct patient_id,
+                             curation_indicator,
+                             min(diagnosis_date) as met_date,
+                             min(diagnosis_date_collected) AS met_date_collected
+                FROM condition
+                WHERE curation_indicator = 1 and
+                      LOWER(diagnosis_type_name) ILIKE 'metastatic%'
+                group by 1,2
+                )
+           ) met
+           WHERE met_date_collected IS NOT NULL AND
+                 len(met_date_collected) > 4 -- at least YYYY-MM
+            group by patient_id
+
+ )
+, breast_antineoplastics as ( -- all systemic therapies for breast cancer
+    select rxcui, drug_name, broad_category
+    from breast_antineo.drug
+        join breast_antineo.drug_rxnorm_map using (drug_code)
+        join breast_antineo.drug_condition using (drug_code)
+        join breast_antineo.condition using (condition_code)
+    where patient_cohort = 'breast' and antineoplastic <> 'never'
+ )
+, sys_tx as (
+    select distinct patient_id,
+                    med_generic_name_code,
+                    med_generic_name_name
+    from medication m
+    inner join breast_antineoplastics bn on m.med_generic_name_code = bn.rxcui
+    where lower(med_route_name) not ilike '%intravenous%' or
+          (med_route_name is null and med_status = 'administered') or
+          (lower(med_route_name) ilike '%intravenous%' and med_status = 'administered')
+ )
+select distinct patient_id,
+                met_date
+    from mets
+inner join sys_tx using (patient_id)
+);
+
+select count(distinct patient_id) from #breast_pts_systx; -- 11,734 distinct pts
+
+
+
+
+
+
+
+--------------------------
+-- -> diagnosed between 2016 and 2021
+select count(distinct patient_id) from #breast_pts_systx
+where date_part(year,met_date) between 2016 and 2021; -- 6,445 distinct pts
+
+
+
+
+
+
+------------------------------------------------------------------------------------
+-- --> mBC with no other malignancy within 3 years
+
+drop table if exists #mBC_no2ndprim;
+create table #mBC_no2ndprim as (
+with second_prim as (select distinct patient_id,
+                                     diagnosis_date,
+                                     diagnosis_code_code,
+                                     diagnosis_code_name
+
+                     from condition
+                     where diagnosis_type_code = '109359008'
+                       and curation_indicator = 1
+)
+, dx_1621 as ( -- finding patients diagnosed 2016-2021
+    select patient_id,
+           met_date
+        from #breast_pts_systx -- filter from last list of patients
+    where date_part(year,met_date) between 2016 and 2021
+)
+, other_malig as (
+       select patient_id,
+              met_date,
+              datediff(month, trunc(met_date), trunc(diagnosis_date)) as met_secprim_diff
+       from dx_1621
+           inner join second_prim using (chai_patient_id)
+)
+select patient_id,
+       met_date
+from dx_1621
+where patient_id not in (
+    select distinct patient_id from other_malig
+    where abs(met_secprim_diff) <= 36 -- within 3 years
+    )
+
+);
+
+select count(distinct patient_id) from #mBC_no2ndprim; -- 6215
+
+
+
+
+-------------------------------------------------------------------------------------------------------------
+
+-- ---> HER2 test within [-12m,1m] of met diagnosis date
+
+with her2_test as (
+    select distinct patient_id,
+           test_date
+    from patient_tests_given
+    where (test_name_code in ('18474-7', '72383-3', '31150-6', '49683-6', '74860-8') or
+       (test_name_code = '3430' and LOWER(test_method_name) similar to '(immunohisto%|%ish%|%in situ%)') or
+       (test_name_code = 'C16152' and
+            lower(test_method_name) similar to '(immunohisto%|%ish%|%in situ%)' and
+            (lower(genetic_test_type_name) similar to '(copy number%|%amplifi%)' or genetic_test_type_name is null)) or
+       (test_name_code = '48676-1' and (test_value_numeric in ('0', '0+', '1', '1+', '2', '2+', '3', '3+')
+                                        or test_value_numeric is null))
+    )
+)
+, mBC_w_test as (
+select distinct patient_id,
+                met_date
+                 from #mBC_no2ndprim
+                          inner join her2_test using (patient_id)
+                 where datediff(month, trunc(met_date), trunc(test_date)) >= -12 and
+                       datediff(month, trunc(met_date), trunc(test_date)) <= 1
+)
+select count(distinct patient_id) from mBC_w_test; --4406
+
+
+
+
+
+
+------------------------------------------------------------------------------------------------------------------
+
+-- ----> ER/PR test withing [-12m,1m] of met diagnosis date
+
+with her2_test as (
+    select distinct patient_id,
+           test_date
+    from patient_tests_given
+    where (test_name_code in ('18474-7', '72383-3', '31150-6', '49683-6', '74860-8') or
+       (test_name_code = '3430' and LOWER(test_method_name) similar to '(immunohisto%|%ish%|%in situ%)') or
+       (test_name_code = 'C16152' and
+            lower(test_method_name) similar to '(immunohisto%|%ish%|%in situ%)' and
+            (lower(genetic_test_type_name) similar to '(copy number%|%amplifi%)' or genetic_test_type_name is null)) or
+       (test_name_code = '48676-1' and (test_value_numeric in ('0', '0+', '1', '1+', '2', '2+', '3', '3+')
+                                        or test_value_numeric is null))
+    )
+)
+,
+ er_pr as (
+    select patient_id,
+                  test_date
+           from patient_tests_given
+           where test_date is not null and
+                 (test_name_code IN ('14228-1', '40556-3', '16112-5') or (test_name_code = '3467' AND test_method_name ILIKE '%immunohisto%')) --er
+              or ( test_name_code IN ('16113-3', '14230-7', '40557-1') or (test_name_code = '8910' AND test_method_name ILIKE '%immunohisto%') ) -- pr
+              or (test_name_name ilike '%hormone recept%' and lower(test_method_name) ilike 'immuno%') -- hormone receptor
+    UNION
+    select patient_id,
+             diagnosis_date as test_date
+      from condition
+      where diagnosis_code_code ilike '%z17.%'
+
+)
+, mBC_her as (select distinct patient_id,
+                              met_date
+              from #mBC_no2ndprim
+                       inner join her2_test using (patient_id)
+              where datediff(month, trunc(met_date), trunc(test_date)) >= -12
+                and datediff(month, trunc(met_date), trunc(test_date)) <= 1
+)
+select count(distinct patient_id)
+from mBC_her
+inner join er_pr using (patient_id)
+where datediff(month, trunc(met_date), trunc(test_date)) >= -12
+  and datediff(month, trunc(met_date), trunc(test_date)) <= 1; -- 3615
+
+
+
